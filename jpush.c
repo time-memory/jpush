@@ -1,17 +1,6 @@
 #include <stdio.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <time.h>
-#include <errno.h>
-#include <signal.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
+#include "lwip/api.h"
 #include "jpush.h"
 
 extern int md5_32_encode(char* encrypt, char* out);
@@ -19,7 +8,6 @@ extern int md5_32_encode(char* encrypt, char* out);
 static int jpush_get_verification_code(JPUSH_MESSAGE_T* t_veri_info)
 {
     char                to_code_str[STR_TO_MD5_MAX_LEN] = {0};
-    char                s_sendno[SEND_NO_MAX_LEN] = {0};
     char                c_reciever_type[RECVR_TYPE_MAX_LEN] = {0};
 
     sprintf(to_code_str, "%d", t_veri_info->sendno);
@@ -300,6 +288,7 @@ static int jpush_create_http_request(JPUSH_MESSAGE_T* t_jpush_msg, char* requst_
     strcat(requst_string, "POST /v2/push HTTP/1.1\n");
     strcat(requst_string, "Host: api.jpush.cn\n");
     strcat(requst_string, "Content-Type: application/x-www-form-urlencoded\n");
+    strcat(requst_string, "Connection: close\n");
     strcat(requst_string, "Content-Length: ");
 
     len = strlen(post_param);
@@ -313,94 +302,207 @@ static int jpush_create_http_request(JPUSH_MESSAGE_T* t_jpush_msg, char* requst_
     return RET_OK;
 }
 
-int jpush_push_message(JPUSH_PARAM_T* t_push_param)
+static int jpush_send_http_request(struct netconn *p_connect, char* request_str, char* p_recv_data)
 {
-    int                 sockfd, ret, i, h;
-    struct sockaddr_in  servaddr;
-    char                buf[BUFSIZE];
-    socklen_t           len;
-    fd_set              t_set1;
-    struct timeval      tv;
+    err_t           err;
+    struct          netbuf *recvbuf;
+    struct          pbuf *q;
+    int             data_len = 0;
+
+    err = netconn_write(p_connect,(void*)&request_str,strlen(request_str),NETCONN_NOCOPY);
+    printf("netconn write over....... %d world send.\n",strlen(request_str));
+    if(err != ERR_OK)
+    {
+        printf("connect write failed! err = %d (%s, %d)\n",err,__FUNCTION__,__LINE__);
+        netconn_close(p_connect);
+        netconn_delete(p_connect);
+        return RET_FAIL;
+    }
+
+    err = netconn_recv(p_connect,&recvbuf);
+    if(err != ERR_OK)
+    {
+        printf("connect recv failed! err = %d (%s, %d)\n",err,__FUNCTION__,__LINE__);
+        netconn_close(p_connect);
+        netconn_delete(p_connect);
+        return RET_FAIL;
+    }
+
+    if (ERR_OK == err)
+    {
+        memset(p_recv_data,0,TCP_CLIENT_RX_BUFSIZE);
+
+        for(q=recvbuf->p; q!=NULL; q=q->next)
+        {
+            if(q->len > (TCP_CLIENT_RX_BUFSIZE-data_len))
+            {
+                memcpy(p_recv_data+data_len,q->payload,(TCP_CLIENT_RX_BUFSIZE-data_len));
+            }
+            else
+            {
+                memcpy(p_recv_data+data_len,q->payload,q->len);
+            }
+
+            data_len += q->len;
+            if(data_len > TCP_CLIENT_RX_BUFSIZE)
+            {
+                break;
+            }
+        }
+
+        data_len=0;
+        netbuf_delete(recvbuf);
+    }
+
+    netconn_close(p_connect);
+    netconn_delete(p_connect);
+
+    return RET_OK;
+}
+
+static int jpush_process_return_data(char* p_recv_data)
+{
+    printf("%s \n",p_recv_data);
+
+    return RET_OK;
+}
+
+static int jpush_convert_ip_address(char* ipstr, int* ip)
+{
+    sscanf(ipstr,"%d.%d.%d.%d",&ip[0],&ip[1],&ip[2],&ip[3]);
+
+    return RET_OK;
+}
+
+int jpush_lwip_push_message(JPUSH_PARAM_T* t_push_param)
+{
+    struct netconn      *p_net_conn = NULL;
+    struct ip_addr      server_ip;
+    err_t               err_no;
+    int                 ip_int[4];
 
     JPUSH_MESSAGE_T     t_jpush_msg;
     char                request_string[HTTP_REQUEST_STR_MAX_LEN] = {0};
+    char                recv_data[TCP_CLIENT_RX_BUFSIZE];
+
+    p_net_conn = netconn_new(NETCONN_TCP);
+    if(NULL == p_net_conn)
+    {
+        printf("start new connect failed! (%s, %d)\n",__FUNCTION__,__LINE__);
+        return RET_FAIL;
+    }
+
+    err_no = netconn_bind(p_net_conn, NULL, LOCAL_PORT);
+    if(err_no != ERR_OK)
+    {
+        netconn_delete(p_net_conn);
+        printf("netconn bind failed! err_no = %d (%s, %d)\n",err_no,__FUNCTION__,__LINE__);
+        return RET_FAIL;
+    }
+
+    jpush_convert_ip_address(SERVER_IP, ip_int);
+    IP4_ADDR(&server_ip,ip_int[0],ip_int[1],ip_int[2],ip_int[3]);
+
+    err_no = netconn_connect(p_net_conn, &server_ip, SERVER_PORT);
+    if(err_no != ERR_OK)
+    {
+        netconn_delete(p_net_conn);
+        printf("netconn connect failed! err_no = %d (%s, %d)\n",err_no,__FUNCTION__,__LINE__);
+        return RET_FAIL;
+    }
+
+    memset(&t_jpush_msg, 0, sizeof(JPUSH_MESSAGE_T));
+    err_no = jpush_user_param_process(t_push_param,&t_jpush_msg);
+    if(err_no != ERR_OK)
+    {
+        netconn_close(p_net_conn);
+        netconn_delete(p_net_conn);
+        printf("user param process failed! (%s, %d)\n",err_no,__FUNCTION__,__LINE__);
+        return RET_FAIL;
+    }
+
+    err_no = jpush_create_http_request(&t_jpush_msg,request_string);
+    if(err_no != ERR_OK)
+    {
+        netconn_close(p_net_conn);
+        netconn_delete(p_net_conn);
+        printf("create http request failed! (%s, %d)\n",err_no,__FUNCTION__,__LINE__);
+        return RET_FAIL;
+    }
+
+    printf("%s \n", request_string);
+    err_no = jpush_send_http_request(p_net_conn, request_string, recv_data);
+    if(err_no != ERR_OK)
+    {
+        printf("send http request failed! (%s, %d)\n",err_no,__FUNCTION__,__LINE__);
+        return RET_FAIL;
+    }
+
+    jpush_process_return_data(recv_data);
+
+    return RET_OK;
+}
+
+int jpush_socket_push_message(JPUSH_PARAM_T* t_push_param,char* retdata)
+{
+    int                 sockfd;
+    struct sockaddr_in  server_addr;
+    JPUSH_MESSAGE_T     t_jpush_msg;
+    char                request_string[HTTP_REQUEST_STR_MAX_LEN] = {0};
+    int                 ret_val;
+    char                read_buf[BUFSIZE];
+    int                 read_counts = 0;
 
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0 )
     {
-        printf("create socket failed ---socket error!\n");
-        exit(0);
+        printf("create socket failed! (%s, %d)\n",__FUNCTION__,__LINE__);
+        return RET_FAIL;
     }
 
-    bzero(&servaddr, sizeof(servaddr));
-    servaddr.sin_family = AF_INET;
-    servaddr.sin_port = htons(PORT);
-    if (inet_pton(AF_INET, IPSTR, &servaddr.sin_addr) <= 0 )
+    bzero(&server_addr, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(SERVER_PORT);
+
+    if (inet_pton(AF_INET, SERVER_IP, &server_addr.sin_addr) <= 0 )
     {
-        printf("create connect failed--inet_pton error!\n");
-        exit(0);
+        printf("IP convert failed! (%s, %d)\n",__FUNCTION__,__LINE__);
+        return RET_FAIL;
     }
 
-    if (connect(sockfd, (struct sockaddr *)&servaddr, sizeof(servaddr)) < 0)
+    if (connect(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
     {
-        printf("connect failed,connect error!\n");
-        exit(0);
+        printf("connect server failed! (%s, %d)\n",__FUNCTION__,__LINE__);
+        return RET_FAIL;
     }
 
     memset(&t_jpush_msg,0,sizeof(JPUSH_MESSAGE_T));
     jpush_user_param_process(t_push_param,&t_jpush_msg);
-
     jpush_create_http_request(&t_jpush_msg,request_string);
 
-    ret = write(sockfd,request_string,strlen(request_string));
-    if (ret < 0) {
-            printf("send failed ,%d, %s\n",errno, strerror(errno));
-            exit(0);
-    }else{
-            printf("send succeed, %d world send!\n\n", ret);
+    printf("\n\n%s\n",request_string);
+
+    ret_val = write(sockfd,request_string,strlen(request_string));
+    if (ret_val < 0)
+    {
+        printf("socket write failed! (%s, %d)\n",__FUNCTION__,__LINE__);
+        close(sockfd);
     }
 
-    FD_ZERO(&t_set1);
-    FD_SET(sockfd, &t_set1);
+    memset(read_buf,0,BUFSIZE);
+    read_counts = read(sockfd, read_buf, READ_LEN);
 
-    while(1){
-            sleep(2);
-            tv.tv_sec= 0;
-            tv.tv_usec= 0;
-            h= 0;
-            printf("--------------->1");
-            h= select(sockfd +1, &t_set1, NULL, NULL, &tv);
-            printf("--------------->2");
-
-            //if (h == 0) continue;
-            if (h < 0) {
-                    close(sockfd);
-                    printf(" read failed \n");
-                    return -1;
-            };
-
-            if (h > 0){
-                    memset(buf, 0, 4096);
-                    i= read(sockfd, buf, 4095);
-                    if (i==0){
-                            close(sockfd);
-                            printf("remote closed \n");
-                            return -1;
-                    }
-
-                    printf("%s\n", buf);
-            }
-    }
+    strcpy(retdata,read_buf);
 
     close(sockfd);
 
     return RET_OK;
 }
 
-
-int main(int argc, char **argv)
+int jpush_test(void)
 {
     JPUSH_PARAM_T           t_push_param;
     MESSAGE_CONTENT_T       msg_content;
+    char                    retdata[256] = {0};
 
     memset(&t_push_param,0,sizeof(JPUSH_PARAM_T));
     memset(&msg_content,0,sizeof(MESSAGE_CONTENT_T));
@@ -416,7 +518,9 @@ int main(int argc, char **argv)
     t_push_param.user_recvr_type = BROADCAST;
     t_push_param.user_msg_content = msg_content;
 
-    jpush_push_message(&t_push_param);
+//    jpush_lwip_push_message(&t_push_param);
+    jpush_socket_push_message(&t_push_param,retdata);
+    printf("recive data:\n%s\n",retdata);
 
     return 0;
 }

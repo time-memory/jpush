@@ -1,9 +1,12 @@
 #ifndef _JPUSH_H_
 #define _JPUSH_H_
 
-#define IPSTR                       "121.46.20.48"
-#define PORT                        8800
-#define BUFSIZE                     1024
+#define SERVER_IP                   "121.46.20.48"
+#define SERVER_PORT                 8800
+#define BUFSIZE                     512
+#define TCP_CLIENT_RX_BUFSIZE       512
+#define LOCAL_PORT                  7200
+#define READ_LEN                    512
 
 #define APP_KEY                     "0b19ef9fac86ab297e8966db"
 #define MASTER_SECRET               "2343b7ed439484be315e339f"
@@ -21,9 +24,9 @@
 #define MSG_CONTENT_MAX_LEN         280
 #define PLATFORM_MAX_LEN            30
 #define PARAM_NAME_MAX_LEN          20
-#define PACKED_MSG_MAX_LEN          2048
+#define PACKED_MSG_MAX_LEN          750
 #define STR_TO_MD5_MAX_LEN          300
-#define HTTP_REQUEST_STR_MAX_LEN    4096
+#define HTTP_REQUEST_STR_MAX_LEN    1024
 
 #define PARAM_NOT_USE               -1
 
@@ -32,7 +35,7 @@
 #define PLATFORM_WINDOWS_PHONE      0x1<<2
 
 #define SEND_NO_VALUE_MIN           0
-#define SEND_NO_VALUE_MAX           4294967295
+#define SEND_NO_VALUE_MAX           4294967295UL
 
 #define TIME_TO_LIVE_MIN            0
 #define TIME_TO_LIVE_MAX            864000
@@ -97,5 +100,10 @@ typedef struct _JPUSH_PARAM_T
     int                     user_time_to_live;
     char                    user_override_msg_id[OVERRIDE_MSG_ID_MAX_LEN];
 }JPUSH_PARAM_T;
+
+extern int jpush_lwip_push_message(JPUSH_PARAM_T* t_push_param);
+extern int jpush_socket_push_message(JPUSH_PARAM_T* t_push_param,char* retdata);
+
+extern int jpush_test(void);
 
 #endif
